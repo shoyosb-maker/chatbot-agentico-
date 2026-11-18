@@ -1,0 +1,611 @@
+=====================================================================
+MOTOBOT · DOCUMENTO TÉCNICO DE ESTADO DEL PROYECTO
+Registro de lo construido, decisiones tomadas y trabajo pendiente
+=====================================================================
+
+Versión del documento : 1.2
+Última actualización  : 2026-11-17
+Fase actual           : MVP funcional (front-end estático, sin backend)
+Responsable técnico   : Agente IA (Copilot SDK en VS Code) + super usuario
+Archivo               : ESTADO_PROYECTO.txt
+
+IMPORTANTE: este archivo NO es el manual de motos. El manual que usa el
+asistente como fuente técnica es "documento_motos.txt".
+
+
+=====================================================================
+0. PROTOCOLO DE USO PARA EL AGENTE (LEER PRIMERO)
+=====================================================================
+Este documento es la memoria del proyecto. Cualquier agente o persona
+que retome el trabajo debe:
+
+  0.1 LEER este archivo completo antes de proponer o hacer cambios.
+  0.2 Revisar la sección 9 (PENDIENTES) para saber qué sigue.
+  0.3 Al terminar CUALQUIER cambio de código, actualizar en el mismo
+      commit/entrega:
+        - sección 2 (inventario), si se agregó/eliminó/renombró archivo
+        - sección 6 (funcionalidades), marcando lo nuevo
+        - sección 9 (pendientes), marcando [x] lo hecho y agregando lo
+          que haya surgido
+        - sección 12 (registro de cambios), con fecha y resumen
+        - "Versión del documento" y "Última actualización" (arriba)
+  0.4 No marcar nada como hecho sin haberlo verificado (sección 10).
+  0.5 Mantener el formato de texto plano y los marcadores:
+        [x] hecho y verificado
+        [ ] pendiente
+        [~] en curso o parcial
+        (P1/P2/P3) prioridad: P1 = bloqueante, P2 = importante, P3 = mejora
+
+
+=====================================================================
+1. RESUMEN EJECUTIVO
+=====================================================================
+MotoBot es una landing comercial de un taller de motos con tres piezas:
+
+  a) Un sitio público (index.html) que presenta servicios, catálogo
+     destacado, preguntas frecuentes y un asistente flotante.
+  b) Un catálogo/cotizador (catalogo.html) con precios en COP y envío de
+     la cotización por WhatsApp.
+  c) Un asistente conversacional con IA (chat.html) que responde con base
+     en un manual técnico cargado (RAG local), complementa con búsqueda
+     web solo cuando hace falta, cotiza con el catálogo oficial y analiza
+     fotos de la moto.
+  d) Un panel de super usuario (admin.html) que configura proveedor,
+     modelo, API key, temperatura, modo de respuesta y el documento
+     técnico.
+
+Estado: el producto funciona de punta a punta en el navegador. Todavía
+NO hay backend: la configuración, las claves y el documento viven en
+localStorage del navegador del administrador. Ese es el límite principal
+actual (ver secciones 8 y 9).
+
+Stack: HTML + CSS + JavaScript vanilla. Sin frameworks, sin build, sin
+dependencias, sin package.json. Todo se sirve como archivos estáticos.
+
+
+=====================================================================
+2. INVENTARIO DE ARCHIVOS
+=====================================================================
+
+  index.html            457 líneas  Landing pública. Nav con dropdown de
+                                    catálogo, hero, stats, servicios,
+                                    grilla de catálogo destacado
+                                    (generada por JS), pasos, FAQ,
+                                    footer con WhatsApp y acceso al panel,
+                                    botón flotante (FAB) + widget de chat
+                                    en <iframe>.
+  catalogo.html         332 líneas  Página de catálogo y cotizador.
+                                    Chips por categoría, buscador,
+                                    tarjetas con cantidad y carrito
+                                    lateral con total y envío a WhatsApp.
+  catalogo.js           145 líneas  Datos y lógica COMPARTIDA: arreglo
+                                    CATALOGO (19 artículos), formato de
+                                    moneda COP, normalización/stemming de
+                                    texto, matchCatalog(), quantityFor(),
+                                    buildQuote(), waLink().
+  chat.html            1044 líneas  Asistente completo: estado, prompts,
+                                    recuperación TF-IDF, streaming SSE,
+                                    búsqueda web por proveedor, análisis
+                                    de imágenes con DeepSeek-flash y con
+                                    OpenAI, cotización y render. Carga
+                                    sola el documento por defecto.
+  admin.html            563 líneas  Panel de super usuario: login local,
+                                    configuración de API (DeepSeek por
+                                    defecto, key de pruebas ya cargada y
+                                    aviso de si el modelo ve imágenes),
+                                    cuadro "Usa esta API para testear",
+                                    documento técnico precargado con
+                                    documento_motos.txt y selección del
+                                    modo de respuesta.
+  config.js             161 líneas  Configuración compartida: catálogo de
+                                    proveedores (PROVIDERS) con
+                                    defaultKey y visionModels, claves de
+                                    localStorage (APP_KEYS), lectura y
+                                    guardado de config, getApiKey(),
+                                    loadDefaultDoc(), modelSeesImages(),
+                                    resolveModel(), buildChunks(),
+                                    maskKey().
+  documento_motos.txt   485 líneas  Manual técnico de mantenimiento
+                                    (22 secciones). Es la fuente principal
+                                    del asistente. Codificado en UTF-8,
+                                    sin BOM.
+  ESTADO_PROYECTO.txt               Este documento.
+
+  Dependencias entre archivos:
+    index.html    -> catalogo.js, iframe -> chat.html
+    catalogo.html -> catalogo.js
+    chat.html     -> config.js, catalogo.js
+    admin.html    -> config.js
+
+  No existe: package.json, .git, backend, carpeta de imágenes/assets,
+  favicon, tests, configuración de lint o despliegue.
+
+
+=====================================================================
+3. ARQUITECTURA Y FLUJOS
+=====================================================================
+3.1 Tipos de despliegue previstos
+    - Estático en el mismo origen (los 6 archivos juntos). El widget del
+      landing funciona porque chat.html es del mismo origen y comparte
+      localStorage con admin.html.
+
+3.2 Flujo de configuración (super usuario)
+    admin.html -> login local (usuario "admin", clave "123", validados en
+    el propio HTML) -> guarda en localStorage -> chat.html lee esa misma
+    configuración al cargar (loadSettings()).
+
+3.3 Flujo de conversación en modo "híbrido" (por defecto)
+    1. El usuario escribe (o adjunta foto) en chat.html.
+    2. buildQuote(question) calcula una cotización determinística si el
+       texto expresa intención de precio (PRICE_INTENT).
+    3. webDigest(question) busca en internet:
+         - OpenAI: POST /responses con la herramienta hospedada
+           web_search (si falla con 400/404/422 reintenta con
+           web_search_preview).
+         - DeepSeek: POST /v1/tools/search (count 6).
+         - Respaldo público sin clave: Wikipedia (es) + DuckDuckGo
+           Instant Answer.
+       Si la consulta trae imagen, NO se busca en internet.
+    4. buildSystemContent() arma el prompt: reglas + los 6 fragmentos
+       del manual más relevantes (TF-IDF) + catálogo completo + la
+       cotización calculada + (si aplica) los datos de internet.
+    5. Se envía a /chat/completions con stream:true y se pinta la
+       respuesta en vivo (SSE).
+    6. stripLinks() elimina URLs, dominios y enlaces del texto.
+    7. Si la consulta es de repuestos/servicios/compra (o hay cotización
+       o foto), appendContact() añade el cierre con enlace de WhatsApp
+       precargado. El modelo tiene prohibido escribir ese cierre.
+
+3.4 Flujo en modo "solo manual" (doc)
+    Igual, pero sin búsqueda web, con 4 fragmentos de contexto y el
+    SYSTEM_PROMPT estricto ("si no está en el documento, dilo").
+
+3.5 Flujo de imagen
+    El botón "+" abre menú Fotos / Cámara. La imagen se reduce a 1280 px
+    y se comprime a JPEG 0.82 (downscaleImage) y se envía como
+    image_url en el mensaje. Solo disponible con OpenAI (vision:true).
+    Con DeepSeek activo se avisa por toast y no se permite adjuntar.
+
+3.6 Flujo de imagen entrante desde el catálogo
+    chat.html acepta ?q=texto: precarga el input y envía automáticamente
+    a los 250 ms. (El parámetro está implementado pero HOY NINGUNA
+    página lo usa -> ver pendiente F-01.)
+
+
+=====================================================================
+4. PROVEEDORES, MODELOS Y ENDPOINTS
+=====================================================================
+Definidos en config.js (PROVIDERS):
+
+  OpenAI
+    base            https://api.openai.com/v1
+    modelos         gpt-4o-mini (inicial), gpt-4.1-mini, gpt-4o, gpt-4.1
+    visión          sí
+    búsqueda        /responses + web_search / web_search_preview
+    claves storage  motobot_key_openai, motobot_model_openai
+    usa temperature (por defecto 0.2, rango 0-1)
+
+  DeepSeek  (proveedor POR DEFECTO)
+    base            https://api.deepseek.com
+    modelos         auto (=deepseek-flash, inicial), deepseek-flash,
+                    deepseek-v4-pro
+    visión          sí, con deepseek-flash (input_modalities text+image);
+                    deepseek-v4-pro es solo texto y el chat bloquea el
+                    adjuntar con un aviso. Verificado contra la API real.
+    búsqueda        /v1/tools/search
+    claves storage  motobot_key_deepseek, motobot_model_deepseek
+    key por defecto sk-7242121ec5e84bf1b74a30daa63abb25 (defaultKey en
+                    config.js; es una key de PRUEBAS y está a la vista en
+                    el código: válida, pero pública)
+    envía thinking {type: enabled|disabled} en lugar de temperature.
+    DEEPSEEK_THINKING = false (más rápido y barato).
+
+  Endpoints externos usados (todos desde el navegador):
+    POST {base}/chat/completions        respuesta en streaming SSE
+    POST {base}/responses               solo OpenAI, búsqueda web
+    POST {base}/v1/tools/search         solo DeepSeek
+    GET  es.wikipedia.org/w/api.php     respaldo de búsqueda
+    GET  api.duckduckgo.com             respaldo de búsqueda
+    https://wa.me/<numero>?text=...     contacto y cotización
+
+  Único cambio de precio/catálogo: catalogo.js (CATALOGO).
+  WhatsApp: constante WHATSAPP_NUMBER = '573177366474' (catalogo.js).
+
+
+=====================================================================
+5. ALMACENAMIENTO (localStorage / sessionStorage)
+=====================================================================
+  motobot_provider        'deepseek' (por defecto) | 'openai'
+  motobot_temp            temperatura (string numérico)
+  motobot_mode            'hybrid' | 'doc'
+  motobot_doc             texto completo del manual cargado
+  motobot_key_openai      API key de OpenAI
+  motobot_model_openai    modelo elegido para OpenAI
+  motobot_key_deepseek    API key de DeepSeek; si no hay ninguna guardada
+                          se usa la key de pruebas de config.js
+                          (PROVIDERS.deepseek.defaultKey)
+  motobot_model_deepseek  modelo elegido para DeepSeek
+  motobot_admin           (sessionStorage) marca de sesión del panel
+
+  Valores por defecto (navegador limpio):
+  - DeepSeek siempre tiene key: la guardada o la de pruebas.
+  - motobot_doc: si la clave NO existe en localStorage se descarga
+    documento_motos.txt por fetch y se guarda. Si existe (aunque esté
+    vacía porque se pulsó "Vaciar documento") se respeta tal cual.
+  - motobot_provider: 'deepseek' por defecto (solo pasa a 'openai' si el
+    panel lo guarda así).
+  - Capacidad de imagen: config.js declara visionModels por proveedor y
+    modelSeesImages(provider, model) decide; el chat, el panel y el aviso
+    del modelo usan esa misma función.
+
+  Consecuencia: la configuración es POR NAVEGADOR. Un navegador nuevo ya
+  arranca con DeepSeek activo (key de pruebas + deepseek-flash), con el
+  documento_motos.txt cargado y con las fotos habilitadas: el chat
+  funciona sin configurar nada. OpenAI solo se usa si el panel lo
+  guarda, y entonces sí hay que pegar su key.
+
+
+=====================================================================
+6. FUNCIONALIDADES IMPLEMENTADAS
+=====================================================================
+
+LANDING (index.html)
+  [x] Nav pegajosa con menú desplegable de categorías del catálogo.
+  [x] Hero con CTA a catálogo y al asistente; tarjeta de precios.
+  [x] Bloque de stats, 6 tarjetas de servicios, FAQ desplegable.
+  [x] Grilla de catálogo destacado generada desde catalogo.js
+      (DESTACADOS: bujia-ngk, filtro-aceite, aceite-10w40, kit-arrastre,
+      pastillas-freno, servicio-preventivo).
+  [x] Enlaces de WhatsApp con mensaje precargado (waLink).
+  [x] Widget de chat en iframe con carga diferida, cierre con Escape,
+      enlace "Ampliar" a chat.html y apertura automática con ?chat=1
+      (usado por el botón "Minimizar" del chat).
+  [x] Acceso al panel de super usuario desde el footer.
+  [x] Responsive (breakpoints a 900 px).
+
+CATÁLOGO (catalogo.html + catalogo.js)
+  [x] 19 artículos en 5 categorías: Repuesto, Consumible, Accesorio,
+      Servicio, Moto nueva. Precios en COP con formato es-CO.
+  [x] Filtro por categoría (chips + parámetro ?cat=) y buscador de texto
+      normalizado (sin acentos).
+  [x] Carrito en memoria con cantidades 1-20, subtotales, total,
+      eliminación por artículo y vaciado.
+  [x] Envío de la cotización completa a WhatsApp; guarda si está vacío.
+  [x] Búsqueda difusa de artículos (matchCatalog): raíces de palabras,
+      IDF, coincidencia por prefijo, bonus para artículos exclusivos y
+      para "N litros de aceite"; umbral 0.3, máximo 4 resultados.
+  [x] quantityFor(): detecta "2 bujías", "tres filtros", "2 litros".
+  [x] hasPriceIntent()/buildQuote(): solo cotiza si el usuario pide
+      precio/compra; devuelve items + total exactos.
+
+ASISTENTE (chat.html)
+  [x] Dos modos: híbrido (manual + web, manual manda) y solo manual.
+  [x] RAG local sin servidor: buildChunks (bloques ~1000 caracteres con
+      150 de solape) + retrieve() TF-IDF (6 fragmentos híbrido / 4 doc).
+  [x] Streaming SSE en vivo con render markdown básico (negritas,
+      código, viñetas).
+  [x] Búsqueda web por proveedor con respaldo público y degradación
+      silenciosa (si falla, responde solo con el manual).
+  [x] stripLinks(): elimina URLs, dominios y enlaces de las respuestas.
+  [x] Cotización determinística inyectada en el prompt: el modelo debe
+      respetar subtotales y total al peso.
+  [x] Cierre automático con WhatsApp solo para consultas de
+      repuestos/servicios/compra (CONTACT_KEYWORDS) o con cotización.
+  [x] Avisos dentro del hilo cuando falta la API o el documento.
+  [x] Historial: se envían los últimos ~11 mensajes como contexto.
+  [x] Adjuntar imagen desde galería o cámara, con vista previa,
+      reducción de tamaño y validación de proveedor con visión.
+  [x] Auto-scroll "pegado" al fondo con botón ↓ cuando el usuario sube.
+  [x] Enter envía, Shift+Enter salto de línea, textarea autoajustable.
+  [x] Botón "Minimizar" (solo a pantalla completa) que vuelve al landing
+      con el widget abierto; se oculta cuando el chat está embebido.
+  [x] Prefill por query string (?q=) con envío automático.
+  [x] Documento por defecto: en un navegador sin documento guardado se
+      descarga documento_motos.txt (fetch, requiere servir por HTTP) y
+      se guarda en localStorage; ya no aparece el aviso "no hay
+      documento técnico cargado".
+  [x] Arranque sin configuración: con DeepSeek la key de pruebas de
+      config.js ya está activa, así que el chat funciona de una.
+  [x] DeepSeek es el proveedor por defecto (config.js y estado inicial de
+      chat.html): navegador limpio = DeepSeek + deepseek-flash.
+  [x] Análisis de imágenes con DeepSeek: deepseek-flash acepta image_url
+      (verificado con la API real, en modo híbrido y en modo solo manual).
+      La foto se envía igual que con OpenAI (data URL JPEG 1280 px).
+  [x] visionReady()/modelSeesImages(): si el modelo activo no ve imágenes
+      (deepseek-v4-pro) el botón "+" avisa y no se puede adjuntar.
+
+PANEL DE SUPER USUARIO (admin.html)
+  [x] Login local (admin / 123) con sesión en sessionStorage y logout.
+  [x] Selección de proveedor y modelo; la key del proveedor elegido se
+      conserva al cambiar de pestaña.
+  [x] Guardar / quitar API key, mostrar-ocultar y slider de temperatura.
+  [x] Estado actual: proveedor, modelo resuelto y key enmascarada.
+  [x] Cuadro "Usa esta API para testear": lista las keys guardadas de
+      ambos proveedores con mostrar / copiar / activar, incluyendo copia
+      con fallback para navegadores sin Clipboard API.
+  [x] Carga de documento .txt/.md (UTF-8) o pegado manual, contador de
+      caracteres y fragmentos, indicador guardado/sin guardar.
+  [x] Guardado y vaciado del documento; selección de modo de respuesta.
+  [x] Al elegir DeepSeek el campo de API key ya viene relleno con la key
+      de pruebas (sk-7242…bb25); "Quitar API key" la borra y deja
+      actuando la key de pruebas por defecto (el toast lo explica).
+  [x] El editor del documento se abre precargado con documento_motos.txt
+      la primera vez (chip "… caracteres · … fragmentos · guardado").
+  [x] "Vaciar documento" guarda un documento vacío explícito para que el
+      manual por defecto no vuelva a cargarse solo.
+  [x] Aviso bajo el selector de modelo: "✅ … analiza las fotos" o
+      "⚠️ … no analiza imágenes" según modelSeesImages().
+
+CONTENIDO
+  [x] Manual técnico de 22 secciones en documento_motos.txt
+      (alcance, seguridad, rodaje, intervalos, aceite, filtro de aire,
+      bujías, transmisión, frenos, neumáticos, suspensión, batería,
+      refrigeración, combustible, válvulas, luces, limpieza,
+      almacenamiento, fallas, torques, checklist, qué no hacer).
+
+
+=====================================================================
+7. REGLAS DE NEGOCIO IMPLEMENTADAS (PROMPTS)
+=====================================================================
+  - Dominio cerrado: solo mantenimiento y tratamiento de motos. Rechazo
+    literal permitido: "Solo puedo ayudarte con mantenimiento y
+    tratamiento de motocicletas."
+  - Prohibido inventar cifras, torques, intervalos, presiones o
+    procedimientos.
+  - Si no está en el manual (modo doc): frase literal de "No encuentro esa
+    información en el documento técnico cargado...".
+  - Jerarquía en híbrido: REGLA CERO = el manual prevalece siempre sobre
+    internet; la web solo completa lo que el manual no cubre.
+  - Precios: única fuente válida es el catálogo; se respetan los valores
+    de la cotización calculada; no se inventan precios ni se usan precios
+    de internet. Formato exigido: "2 × Artículo = $ X COP" y "Total: ...".
+  - El modelo NO escribe despedidas ni invitaciones a WhatsApp: el cierre
+    lo agrega el código (appendContact) para controlar el enlace.
+  - Español, tono técnico, claro y ordenado; pide aclaración si falta
+    marca/modelo/componente.
+  - Instrucciones de imagen: la primera frase debe describir la foto
+    ("En la foto se ve…"); prohibido decir que no puede ver imágenes.
+
+
+=====================================================================
+8. LIMITACIONES Y RIESGOS CONOCIDOS
+=====================================================================
+  L-01 (crítico) Sin backend: la API key vive en localStorage y es
+       legible por cualquier script del mismo origen. Además el login del
+       panel está hardcodeado (admin/123) en el HTML: cualquiera puede
+       abrirlo y ver/copiar las keys guardadas de ese navegador. La key
+       de pruebas de DeepSeek también está escrita en config.js, que se
+       sirve como archivo público (cualquiera puede leerla).
+  L-02 El documento técnico se descarga de documento_motos.txt y se
+       guarda por navegador; si el sitio se abre con file:// el fetch
+       falla y vuelve el aviso "no hay documento cargado". Sirviendo por
+       HTTP un navegador limpio ya responde con el manual.
+  L-03 Las llamadas a OpenAI/DeepSeek se hacen desde el navegador. Depende
+       de CORS y del proveedor; conviene servir el sitio por HTTP y, a
+       futuro, mover las llamadas a un proxy.
+  L-04 La búsqueda web de respaldo (Wikipedia/DuckDuckGo) suele devolver
+       poco y puede fallar por red; el sistema degrada sin avisar mucho.
+  L-05 stripLinks() puede borrar texto legítimo que contenga dominios.
+  L-06 El carrito del catálogo y el historial del chat se pierden al
+       recargar (sin persistencia).
+  L-07 Con DeepSeek, las imágenes solo funcionan con deepseek-flash
+       (deepseek-v4-pro es solo texto); el chat avisa y bloquea el
+       adjuntar en ese modelo.
+  L-08 El selector "Fuente de respuesta" del panel solo se persiste al
+       pulsar "Guardar documento"; no hay guardado independiente.
+  L-09 Sin control de costo: cada mensaje híbrido hace 1 búsqueda + 1
+       completion; no hay límite de uso ni conteo de tokens.
+  L-10 Sin registro de conversaciones, métricas ni trazas de error.
+  L-11 Contenido de ejemplo: precios, número de WhatsApp, cifras de
+       marketing ("+12 años", "+3.500 motos") y ausencia de imágenes
+       reales de producto.
+  L-12 No hay tests ni verificación automática; todo se prueba a mano.
+  L-13 El manual indica valores "orientativos" y advierte que no
+       reemplaza al fabricante; el asistente puede dar un dato genérico
+       si el usuario no indica modelo.
+
+
+=====================================================================
+9. PENDIENTES
+=====================================================================
+Marcadores: [ ] pendiente · [~] parcial · [x] hecho · (P1/P2/P3)
+
+SEGURIDAD Y DESPLIEGUE
+  [ ] B-01 (P1) Backend/proxy mínimo que guarde la API key en servidor
+      (.env) y exponga un endpoint propio de chat. Archivos nuevos +
+      cambios en chat.html (postJson) y admin.html (quitar gestión de
+      keys). Criterio: la key no aparece en localStorage ni en el HTML.
+  [ ] B-02 (P1) Autenticación real del panel (usuario/clave fuera del
+      código, hash o proveedor). Criterio: no hay credenciales en el
+      repositorio y el panel no se abre sin login válido.
+  [ ] B-03 (P1) Servir el sitio por HTTP (p. ej. servidor estático) y
+      documentar el comando de arranque. Criterio: los 4 flujos de la
+      sección 10 funcionan desde http:// y no solo por file://.
+  [x] B-04 (P1) Entregar el manual a todos los visitantes: cargar
+      documento_motos.txt desde el servidor (fetch) o desde el backend
+      en lugar de depender de localStorage. Criterio: un navegador limpio
+      responde con el manual sin configurar nada.
+      Hecho con loadDefaultDoc() en config.js: si motobot_doc no existe,
+      se descarga documento_motos.txt y se guarda. Requiere servir por
+      HTTP (ver B-03); con file:// el fetch falla y no hay manual.
+  [ ] B-05 (P3) Rate limiting / límite de mensajes por sesión y control
+      de costo por conversación.
+  [ ] B-06 (P2) Antes de publicar: quitar (y revocar) la key de pruebas de
+      PROVIDERS.deepseek.defaultKey en config.js, porque ese archivo se
+      sirve público. Criterio: ningún archivo del sitio contiene una key.
+
+FUNCIONALIDAD
+  [ ] F-01 (P2) Añadir en catalogo.html un botón "Preguntar a la IA con
+      esta cotización" que abra chat.html?q=<resumen del carrito>.
+      El parámetro ?q= ya está implementado en chat.html.
+  [ ] F-02 (P2) Persistir el carrito del catálogo (localStorage) y el
+      historial del chat (opción de borrar conversación).
+  [ ] F-03 (P2) Guardar el modo de respuesta en el panel al cambiar el
+      select (sin depender de "Guardar documento").
+  [ ] F-04 (P2) Mensajes de error específicos (401 clave inválida, 429
+      cuota/rate limit, sin red) y botón "Reintentar".
+  [x] F-05 (P2) Precargar el documento base la primera vez que se abre
+      admin.html (sugerir documento_motos.txt si el textarea está vacío).
+      Hecho con loadDefaultDoc(): el textarea abre con el manual y el
+      chip muestra "guardado".
+  [ ] F-06 (P3) Compartir configuración entre pestañas del mismo origen
+      (evento 'storage') para que admin.html y chat.html no requieran
+      recargar.
+  [ ] F-07 (P3) Etiquetar la fuente en modo híbrido solo cuando la
+      respuesta use datos web (hoy todo se integra sin etiquetas).
+  [x] F-08 (P3) Alternativa de visión con DeepSeek o mensaje que ofrezca
+      cambiar de proveedor desde el propio chat.
+      Hecho: deepseek-flash hace el análisis visual (misma tubería que
+      OpenAI) y, con un modelo sin visión, el toast indica qué elegir.
+
+CALIDAD
+  [ ] Q-01 (P2) Pruebas mínimas en Node para la lógica pura de
+      catalogo.js (matchCatalog, quantityFor, buildQuote, buildChunks)
+      sin añadir frameworks. Criterio: un comando único ejecuta los casos.
+  [ ] Q-02 (P3) Revisar stripLinks() con casos límite (dominios dentro de
+      texto legítimo, correos, rutas).
+  [ ] Q-03 (P3) Accesibilidad: roles/aria del widget y del menú de
+      adjuntar, foco al abrir el chat, contraste.
+  [ ] Q-04 (P3) Metadatos SEO/Open Graph y favicon en las 4 páginas.
+
+CONTENIDO
+  [ ] C-01 (P2) Reemplazar datos de ejemplo por los reales del negocio
+      (precios definitivos, WhatsApp, textos de marketing, horarios).
+  [ ] C-02 (P3) Imágenes de producto/motos y logo real (carpeta assets).
+  [ ] C-03 (P3) Ampliar el manual con modelos concretos (marca/modelo/
+      año) para respuestas más específicas y tabla de torques por moto.
+
+
+=====================================================================
+10. CÓMO EJECUTAR Y VERIFICAR
+=====================================================================
+10.1 Arranque local recomendado
+     En la carpeta del proyecto:
+       python -m http.server 8000
+     Abrir http://localhost:8000/index.html
+     (Abrir por file:// funciona para probar, pero localStorage y el
+     iframe se comportan distinto según el navegador.)
+
+10.2 Configuración inicial (una vez por navegador)
+     1. index.html -> footer -> "Iniciar sesión super usuario".
+     2. Usuario: admin · Contraseña: 123.
+     3. Estado por defecto: el documento_motos.txt ya está cargado y
+        DeepSeek ya trae su key de pruebas en el campo de API key.
+        Para usar OpenAI: elegir proveedor, pegar la key y Guardar.
+     4. Verificar que el chip muestre "caracteres · fragmentos · guardado".
+
+10.3 Checklist de verificación manual
+     [ ] Landing: el FAB abre el widget y el iframe carga el chat.
+     [ ] Landing: Escape cierra el widget; "Ampliar" abre chat.html.
+     [ ] Chat: "¿Cada cuántos km cambio el aceite?" responde con datos del
+         manual (verificar contra la sección 5 del manual).
+     [ ] Chat: "¿Cuánto cuestan 2 bujías y un filtro de aceite?" muestra
+         "2 × ... = $ 30.000" + "$ 18.000" y Total $ 48.000 COP.
+     [ ] Chat: una pregunta de repuestos añade el cierre con WhatsApp y
+         el enlace lleva el mensaje precargado.
+     [ ] Chat: "¿Quién ganó el mundial de fútbol?" se rechaza con el
+         mensaje de dominio.
+     [ ] Chat: adjuntar una foto muestra la vista previa y describe la
+         imagen con DeepSeek (deepseek-flash) y con OpenAI.
+     [ ] Chat: con el modelo deepseek-v4-pro, el botón "+" avisa que ese
+         modelo no analiza imágenes.
+     [ ] Chat: "Minimizar" vuelve a index.html?chat=1 con el widget
+         abierto; dentro del iframe el botón no aparece.
+     [ ] Modo "Solo manual": una pregunta fuera del documento devuelve la
+         frase literal de "No encuentro esa información...".
+     [ ] Catálogo: los chips filtran, el buscador filtra, el total suma
+         bien y el botón de WhatsApp se bloquea con el carrito vacío.
+     [ ] Panel: "Quitar API key" con DeepSeek borra la key guardada y
+         vuelve a actuar la key de pruebas (toast que lo avisa, el chat
+         sigue configurado); con OpenAI el chat muestra "API no
+         configurada" tras recargar.
+     [ ] Panel: al elegir DeepSeek el campo de API key ya trae
+         sk-7242…bb25 y el documento abre precargado (chip "guardado").
+     [ ] Chat en navegador limpio servido por HTTP: sin configurar nada,
+         no aparece el aviso de API ni el de documento, el proveedor es
+         DeepSeek y el modelo deepseek-flash.
+     [ ] Panel: "Usa esta API para testear" lista ambas keys y "Copiar"
+         funciona.
+
+10.4 Al cerrar una tarea, actualizar este documento (sección 0.3).
+
+
+=====================================================================
+11. CONVENCIONES DE TRABAJO (NO ROMPER)
+=====================================================================
+  - Sin frameworks ni build: HTML/CSS/JS vanilla, scripts clásicos
+    (variables globales, no módulos ES), scripts al final del body.
+  - Una sola fuente de verdad de precios y artículos: catalogo.js.
+    No duplicar precios en HTML ni en prompts.
+  - No renombrar claves de localStorage sin migración (sección 5).
+  - Mantener los textos de rechazo literales de los prompts: de ellos
+    dependen las pruebas y la coherencia.
+  - No introducir enlaces ni URLs en las respuestas del asistente; el
+    cierre comercial lo agrega el código, no el modelo.
+  - Estilos de cada página autocontenidos en su <style>; variables CSS
+    de la paleta ya definidas (--accent #ff6a00, fondo #0e0f12).
+  - Español de Colombia, precios en COP con money().
+  - Comentarios solo donde aporten; no comentar lo evidente.
+
+
+=====================================================================
+12. REGISTRO DE CAMBIOS
+=====================================================================
+Formato: AAAA-MM-DD · versión · resumen · archivos
+
+2026-11-16 · 1.0 · Creación del documento de estado. Se reconstruye el
+  estado real del proyecto a partir de los archivos existentes: landing,
+  catálogo/cotizador, asistente con RAG local y dos proveedores, panel de
+  super usuario, manual técnico. Se documentan limitaciones y se crea el
+  backlog priorizado. Archivos: ESTADO_PROYECTO.txt (nuevo),
+  .github/copilot-instructions.md (nuevo, apunta a este documento).
+
+2026-11-17 · 1.1 · Key de pruebas de DeepSeek y documento por defecto.
+  config.js: PROVIDERS.deepseek.defaultKey con la key de pruebas
+  (sk-7242…bb25), getApiKey() (key guardada o, si no hay, la de pruebas)
+  y loadDefaultDoc() (descarga documento_motos.txt y lo guarda cuando
+  motobot_doc no existe). admin.html: al elegir DeepSeek el campo de API
+  key ya viene relleno, el cuadro "Usa esta API para testear" usa
+  getApiKey(), el documento abre precargado y "Vaciar documento" guarda
+  un vacío explícito para que no vuelva el manual por defecto; "Quitar
+  API key" avisa que se usa la key de pruebas. chat.html: loadSettings()
+  es async y espera el documento antes de pintar avisos y de enviar el
+  ?q=. Verificado en http://localhost:8123 con un navegador limpio: chip
+  "22.730 caracteres · 31 fragmentos · guardado", avisos ocultos,
+  DeepSeek activo y respuesta real del manual ("cada 3.000 - 5.000 km o
+  6 meses", JASO MA2). La key responde 200 en /models. Archivos:
+  config.js, admin.html, chat.html, ESTADO_PROYECTO.txt.
+
+2026-11-17 · 1.2 · DeepSeek por defecto y fotos con DeepSeek.
+  config.js: currentProvider() devuelve 'deepseek' salvo que el panel haya
+  guardado 'openai'; PROVIDERS.deepseek.vision = true con
+  visionModels: ['deepseek-flash'] y helper modelSeesImages(). chat.html:
+  state.provider/model arrancan en deepseek/auto; visionReady() y
+  visionHint() sustituyen los chequeos de providerCfg().vision, así que el
+  botón "+" y el envío de fotos funcionan con DeepSeek. admin.html: aviso
+  bajo el selector de modelo (✅ analiza fotos / ⚠️ solo texto) y textos
+  del panel actualizados. Verificado con la API real: /models declara
+  input_modalities text+image para deepseek-flash; una imagen con el texto
+  "MOTO ROJA 42" fue leída correctamente en modo híbrido y en modo solo
+  manual; con deepseek-v4-pro el chat avisa y no deja adjuntar. Archivos:
+  config.js, chat.html, admin.html, ESTADO_PROYECTO.txt.
+
+
+=====================================================================
+13. PRÓXIMA ACCIÓN SUGERIDA
+=====================================================================
+Orden recomendado para la siguiente iteración:
+  1. F-01 (botón de cotización hacia el asistente) porque ya existe el
+     soporte ?q= y aporta valor inmediato.
+  2. B-03 (servir por HTTP) para que el manual por defecto se descargue
+     en cualquier navegador.
+  3. B-01/B-02 (backend + auth) y B-06 (quitar y revocar la key de
+     pruebas de config.js) antes de publicar el sitio con una clave real.
+  4. Q-01 (pruebas de la lógica pura) antes de tocar precios o el
+     emparejamiento de artículos.
+  5. Revisar el costo de las fotos: cada imagen grande con detail:high
+     consume tokens; si se nota caro, bajar a 1024 px o detail:auto.
+
+=====================================================================
+FIN DEL DOCUMENTO
+=====================================================================
